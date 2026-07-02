@@ -55,6 +55,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 				ShowSweepMarkers			= true;
 				EnableAlerts				= false;
 
+				FilterOutlierBars			= true;
+				OutlierRangePeriod			= 14;
+				OutlierRangeMultiplier		= 4.0;
+
 				AddPlot(new Stroke(Brushes.DodgerBlue, 2), PlotStyle.Line, "Vwap");
 				AddPlot(new Stroke(Brushes.DarkGray, DashStyleHelper.Dash, 1), PlotStyle.Line, "UpperBand1");
 				AddPlot(new Stroke(Brushes.DarkGray, DashStyleHelper.Dash, 1), PlotStyle.Line, "LowerBand1");
@@ -87,9 +91,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 			double src = (High[0] + Low[0] + Close[0]) / 3.0;
 			double vol = Math.Max(Volume[0], 0);
 
-			sumSrcVol		+= src * vol;
-			sumSrcSrcVol	+= src * src * vol;
-			sumVol			+= vol;
+			// Skip a bar's contribution if its range dwarfs recent bars (bad tick, session-open gap)
+			// so a single outlier print can't drag the whole cumulative average with it.
+			double avgRange = AvgRecentRange(OutlierRangePeriod);
+			bool isOutlierBar = FilterOutlierBars && !double.IsNaN(avgRange) && avgRange > 0
+				&& (High[0] - Low[0]) > OutlierRangeMultiplier * avgRange;
+
+			if (!isOutlierBar)
+			{
+				sumSrcVol		+= src * vol;
+				sumSrcSrcVol	+= src * src * vol;
+				sumVol			+= vol;
+			}
 
 			double vwap = sumVol > 0 ? sumSrcVol / sumVol : src;
 			double variance = sumVol > 0 ? Math.Max((sumSrcSrcVol / sumVol) - (vwap * vwap), 0) : 0;
@@ -159,6 +172,19 @@ namespace NinjaTrader.NinjaScript.Indicators
 			}
 		}
 
+		// Average High-Low range of the 'period' confirmed bars preceding the current one.
+		private double AvgRecentRange(int period)
+		{
+			if (CurrentBar < period)
+				return double.NaN;
+
+			double sum = 0;
+			for (int i = 1; i <= period; i++)
+				sum += High[i] - Low[i];
+
+			return sum / period;
+		}
+
 		#region Properties
 		[NinjaScriptProperty]
 		[Range(1, 50)]
@@ -181,6 +207,20 @@ namespace NinjaTrader.NinjaScript.Indicators
 		[NinjaScriptProperty]
 		[Display(Name = "Enable Alerts", Description = "Fire a NinjaTrader alert when a sweep is detected.", Order = 5, GroupName = "Liquidity")]
 		public bool EnableAlerts { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Filter Outlier Bars", Description = "Exclude bars with an abnormally large range from the VWAP average (bad ticks, session-open gaps).", Order = 6, GroupName = "VWAP")]
+		public bool FilterOutlierBars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, 200)]
+		[Display(Name = "Outlier Range Period", Description = "Number of prior bars used to compute the average range baseline.", Order = 7, GroupName = "VWAP")]
+		public int OutlierRangePeriod { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1.0, 20.0)]
+		[Display(Name = "Outlier Range Multiplier", Description = "A bar is excluded when its range exceeds this multiple of the average recent range.", Order = 8, GroupName = "VWAP")]
+		public double OutlierRangeMultiplier { get; set; }
 
 		[Browsable(false)]
 		[XmlIgnore]
