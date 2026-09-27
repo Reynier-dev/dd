@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 
 from features import cached_features
-from phase2 import MAX_BARS, clustered
+from phase2 import clustered
+from phase4_swing_context import swing_active_days
 from recheck import events
 from signals import filters, triggers
 from sim import Minute, simulate
@@ -31,6 +32,7 @@ def main():
     rows, trades = [], []
     for inst in MARKETS:
         minute = Minute(inst)
+        swing_days, _ = swing_active_days(inst)
         for tf in sorted({x["tf"] for x in finalists}):
             f = cached_features(inst, tf)
             trig, filt = triggers(f), filters(f)
@@ -38,14 +40,19 @@ def main():
             for k, x in enumerate(finalists):
                 if x["tf"] != tf:
                     continue
-                m = events(f, trig, filt, x["trigger"], x["side"], x["f1"], x["f2"]) & f["signal_ok"].to_numpy(bool)
+                if x["f1"] == "Swing diario activo":
+                    m = events(f, trig, filt, x["trigger"], x["side"], "(ninguna)", x["f2"])
+                    m &= pd.Series(f["date"].values).isin(list(swing_days)).to_numpy()
+                else:
+                    m = events(f, trig, filt, x["trigger"], x["side"], x["f1"], x["f2"])
+                m &= f["signal_ok"].to_numpy(bool)
                 d = 1 if x["side"] == "Largo" else -1
                 mode, off = EXEC_MODE[x["exec"]]
                 for p in ("descubrimiento", "validacion", "reserva"):
                     sig = np.flatnonzero(m & (period == p))
-                    tr = simulate(minute, f, tf, sig, d, x["stop"], x["target"], MAX_BARS, mode=mode, offset=off)
+                    tr = simulate(minute, f, tf, sig, d, x["stop"], x["target"], x["max_bars"], mode=mode, offset=off)
                     mean, tcl = clustered(tr, tr["entry_time"].dt.normalize().to_numpy())
-                    rows.append(dict(finalista=k + 1, inst=inst, period=p, n=len(tr), net_pts=mean, t_clu=tcl,
+                    rows.append(dict(finalista=k + 1, fase=x["fase"], origen=x["mercado_origen"], inst=inst, period=p, n=len(tr), net_pts=mean, t_clu=tcl,
                                      net_R=(tr["pts"] / tr["risk_pts"]).mean() if len(tr) else np.nan,
                                      win=(tr["pts"] > 0).mean() * 100 if len(tr) else np.nan,
                                      usd_per_trade=mean * {"NAS100_USD": 20, "SPX500_USD": 50, "US2000_USD": 50}[inst],

@@ -1,0 +1,19 @@
+{
+  "registrado": "2026-09-27, antes de calcular cualquier resultado del período de reserva 2017-2020",
+  "nota": "Ninguna regla cumplió los criterios de selección en descubrimiento + validación. Estos son los mejores que produjo cada búsqueda (mayor mínimo entre el t de descubrimiento y el de validación, ambos con neto > 0), para medir qué pasa fuera de muestra con lo que 'mejor se veía'.",
+  "criterio_de_aprobacion": "neto > 0 con t agrupado por día >= 2 en el mercado de origen, y neto > 0 en al menos 2 de los 3 índices, en 2017-2020",
+  "finalistas": [
+    {"fase": 2, "mercado_origen": "NAS100_USD", "tf": "5m", "trigger": "EMA 9 pullback en tendencia", "side": "Corto",
+     "f1": "Régimen 1h a favor", "f2": "Día a favor (vs apertura)", "exec": "mercado", "stop": 2.0, "target": 3.0, "max_bars": 24},
+    {"fase": 2, "mercado_origen": "NAS100_USD", "tf": "5m", "trigger": "EMA 9 pullback en tendencia", "side": "Corto",
+     "f1": "Lado del VWAP a favor", "f2": "Régimen 1h a favor", "exec": "límite 0,25 ATR", "stop": 2.0, "target": 3.0, "max_bars": 24},
+    {"fase": 2, "mercado_origen": "NAS100_USD", "tf": "3m", "trigger": "EMA 9 pullback en tendencia", "side": "Corto",
+     "f1": "Régimen 1h a favor", "f2": "Hora: apertura 9:35-11:00", "exec": "mercado", "stop": 2.0, "target": 3.0, "max_bars": 24},
+    {"fase": 2, "mercado_origen": "US2000_USD", "tf": "5m", "trigger": "EMA 9 pullback en tendencia", "side": "Largo",
+     "f1": "Hora: cierre 14:00-15:45", "f2": "Gap a favor", "exec": "límite", "stop": 2.0, "target": 3.0, "max_bars": 24},
+    {"fase": 4, "mercado_origen": "NAS100_USD", "tf": "1m", "trigger": "Ruptura squeeze Bollinger", "side": "Largo",
+     "f1": "Swing diario activo", "f2": "", "exec": "límite", "stop": 2.0, "target": 100.0, "max_bars": 1000},
+    {"fase": 4, "mercado_origen": "SPX500_USD", "tf": "5m", "trigger": "Supertrend cambia", "side": "Largo",
+     "f1": "Swing diario activo", "f2": "", "exec": "mercado", "stop": 1.5, "target": 3.0, "max_bars": 24}
+  ]
+}
