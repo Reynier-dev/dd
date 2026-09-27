@@ -3,3 +3,4 @@ __pycache__/
 *.log
 results/scan.csv.gz
 results/phase2.csv.gz
+results/phase5_scan.csv.gz

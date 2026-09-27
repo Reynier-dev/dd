@@ -11,7 +11,7 @@ import pandas as pd  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "ema_rsi"))
-from make_figures import BLUE, GRAY, INK, INK2, MUTED, ORANGE, RED, SURFACE, save as _save, subtitle  # noqa: E402,F401
+from make_figures import BLUE, GRAY, INK, INK2, MUTED, ORANGE, SURFACE, subtitle  # noqa: E402
 
 from features import COST_MARKET  # noqa: E402
 
@@ -89,7 +89,52 @@ def fig_overlap():
     save(fig, "3_ilusion_solapamiento.png")
 
 
+def fig_cost_by_year():
+    c = pd.read_csv(os.path.join(RES, "cost_by_year.csv"))
+    c = c[(c.tf == "1m") & (c.year >= 2008)]
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    for inst, col in zip(SHORT, [BLUE, ORANGE, "#1baf7a"]):
+        s = c[c.inst == inst]
+        ax.plot(s.year, s.cost_atr, color=col, lw=2, marker="o", ms=5, mec=SURFACE, mew=1.5)
+        ax.text(s.year.iloc[-1] + 0.2, s.cost_atr.iloc[-1], SHORT[inst], va="center", fontsize=9, color=INK)
+    ax.set_xlim(2007.5, 2021)
+    ax.set_ylim(0, None)
+    ax.set_ylabel("Costo por operación ÷ ATR de 1 minuto")
+    ax.set_title("El costo fijo pesa cada vez menos en NQ, no en ES", pad=22)
+    subtitle(ax, "Comisión USD 4,50 + 1 tick por lado, dividido por el ATR(14) mediano de 1m en horario regular")
+    save(fig, "4_costo_por_anio.png")
+
+
+def fig_edge_vs_cost_oos():
+    h = pd.read_csv(os.path.join(RES, "holdout_phase5.csv"))
+    h = h[h.finalista <= 8]
+    h["gross_atr"] = h.net_atr + h.cost_atr
+    g = h.groupby(["inst", "period"])[["gross_atr", "cost_atr"]].mean()
+    periods = ["descubrimiento", "validacion", "reserva"]
+    labels = ["2008-13", "2014-16", "2017-20\n(reserva)"]
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3.7), sharey=True)
+    for ax, inst in zip(axes, SHORT):
+        x = np.arange(3)
+        w = 0.36
+        gr = [g.loc[(inst, p), "gross_atr"] for p in periods]
+        co = [g.loc[(inst, p), "cost_atr"] for p in periods]
+        ax.bar(x - w / 2 - 0.01, gr, width=w, color=BLUE, label="Ventaja bruta")
+        ax.bar(x + w / 2 + 0.01, co, width=w, color=ORANGE, label="Costo")
+        for xi, v in zip(x, gr):
+            ax.text(xi - w / 2 - 0.01, v + 0.02, f"{v:.2f}".replace(".", ","), ha="center", fontsize=8.5, color=INK)
+        ax.set_xticks(x, labels, fontsize=8.5)
+        ax.set_title(SHORT[inst], fontsize=11)
+    axes[0].set_ylabel("ATR de 1 minuto por operación")
+    axes[0].legend(loc="upper left", fontsize=8.5)
+    fig.suptitle("La mejor combinación: la ventaja existe, pero el costo es 3 a 6 veces mayor", x=0.01, ha="left",
+                 fontsize=12, fontweight="bold", y=1.05)
+    fig.text(0.01, 0.98, "Retroceso a la EMA 9 en tendencia + días de gap alcista, 1m, salida a 24 min, una operación a la vez",
+             color=INK2, fontsize=9)
+    save(fig, "5_ventaja_vs_costo_reserva.png")
+
+
 if __name__ == "__main__":
-    for fn in sys.argv[1:] or ["fig_cost_barrier", "fig_gross_vs_cost", "fig_overlap"]:
+    for fn in sys.argv[1:] or ["fig_cost_barrier", "fig_gross_vs_cost", "fig_overlap",
+                                   "fig_cost_by_year", "fig_edge_vs_cost_oos"]:
         globals()[fn]()
     print("ok ->", IMG)

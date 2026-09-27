@@ -4,6 +4,9 @@
 5.500 combinaciones de reglas.** Objetivo: encontrar qué relaciones y confirmaciones entre EMAs,
 RSI y el precio tienen ventaja real después de costos, y reducirlas a reglas simples.
 
+> Para scalping (1m, 3m, 5m) con más indicadores y confirmaciones, ver
+> [`research/scalping/REPORT.md`](../scalping/REPORT.md).
+
 ---
 
 ## Resumen para el trader
