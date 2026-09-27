@@ -1,0 +1,118 @@
+{
+  "registrado": "2026-09-27, antes de evaluar la Fase 5 en 2017-2020 (segundo uso del período de reserva; el primero fue finalists.json)",
+  "seleccion": "mecánica: las 10 de mayor t agrupado mínimo en results/phase5_selected.csv (reglas en phase5_atr.py)",
+  "evaluacion": "entrada a mercado en la apertura siguiente, salida a mercado al cierre de h velas (o 16:00), una operación a la vez, neto de comisión + 1 tick por lado, en NQ, ES y RTY",
+  "criterio_de_aprobacion": "en NQ 2017-2020: neto por operación > 0 con t agrupado por día >= 2",
+  "finalistas": [
+    {
+      "tf": "1m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Largo",
+      "f1": "EMAs 9>21>50 alineadas",
+      "f2": "Gap a favor",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.1553,
+      "bruto_atr_2014_2016": 0.2786
+    },
+    {
+      "tf": "1m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Largo",
+      "f1": "Gap a favor",
+      "f2": "",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.1553,
+      "bruto_atr_2014_2016": 0.2786
+    },
+    {
+      "tf": "1m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Largo",
+      "f1": "RSI(14) a favor de 50",
+      "f2": "Gap a favor",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.1552,
+      "bruto_atr_2014_2016": 0.2785
+    },
+    {
+      "tf": "1m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Largo",
+      "f1": "Gap a favor",
+      "f2": "Mercado hermano a favor del VWAP",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.1696,
+      "bruto_atr_2014_2016": 0.2564
+    },
+    {
+      "tf": "1m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Largo",
+      "f1": "Lado del VWAP a favor",
+      "f2": "Gap a favor",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.1732,
+      "bruto_atr_2014_2016": 0.2475
+    },
+    {
+      "tf": "1m",
+      "trigger": "Martillo / estrella",
+      "side": "Largo",
+      "f1": "Gap a favor",
+      "f2": "Mercado hermano a favor del VWAP",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.252,
+      "bruto_atr_2014_2016": 0.2519
+    },
+    {
+      "tf": "1m",
+      "trigger": "Martillo / estrella",
+      "side": "Largo",
+      "f1": "Lado del VWAP a favor",
+      "f2": "Gap a favor",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.2548,
+      "bruto_atr_2014_2016": 0.2252
+    },
+    {
+      "tf": "1m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Largo",
+      "f1": "Régimen 15m a favor",
+      "f2": "Gap a favor",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.2034,
+      "bruto_atr_2014_2016": 0.2249
+    },
+    {
+      "tf": "1m",
+      "trigger": "RSI(2) extremo",
+      "side": "Corto",
+      "f1": "Bias diario a favor",
+      "f2": "Mercado hermano a favor del VWAP",
+      "h": 6,
+      "mercado_origen": "US2000_USD",
+      "bruto_atr_2008_2013": 0.2705,
+      "bruto_atr_2014_2016": 0.1746
+    },
+    {
+      "tf": "3m",
+      "trigger": "EMA 9 pullback en tendencia",
+      "side": "Corto",
+      "f1": "Régimen 1h a favor",
+      "f2": "Gap a favor",
+      "h": 24,
+      "mercado_origen": "SPX500_USD",
+      "bruto_atr_2008_2013": 0.4901,
+      "bruto_atr_2014_2016": 0.4588
+    }
+  ]
+}
