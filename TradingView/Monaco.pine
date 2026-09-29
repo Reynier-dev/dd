@@ -24,6 +24,9 @@
 // REPRODUCCION: el aviso "mercado cerrado -> PDH/PDL de la proxima sesion" ya no se dispara en
 // Bar Replay (timenow es la hora real, no la de la reproduccion).
 //
+// MAX/MIN 4H y 1H: son el maximo y el minimo de la ultima vela cerrada de ese TF (como PDH/PDL),
+// no pivotes antiguos. El 15M sigue usando pivotes.
+//
 // CISD en graficos por encima de 5M: se calcula en la propia vela, sin el retraso de una vela
 // que metia pedir el mismo TF con [1].
 //
@@ -60,7 +63,7 @@ sw1H       = input.bool(true, "Barrer máx/mín 1H", group = g3)
 sw15M      = input.bool(true, "Barrer máx/mín 15M", group = g3)
 sweepPen   = input.float(0.10, "Penetración mínima (x ATR)", minval = 0.0, maxval = 2.0, step = 0.01, group = g3)
 sweepClose = input.bool(true, "Exigir cierre de vuelta dentro del nivel", group = g3)
-liqPerTf   = input.int(2, "Niveles vivos por TF y lado (1 = solo el último swing)", minval = 1, maxval = 5, group = g3)
+liqPerTf   = input.int(2, "Niveles 15M vivos por lado (1 = solo el último swing)", minval = 1, maxval = 5, group = g3)
 
 g4 = "4. POI HT (15M / 1H / 4H)"
 poiFvg     = input.bool(true, "FVG", group = g4)
@@ -301,14 +304,14 @@ f_addLiq(string nm, int rank, bool isHigh, float price, int start, int cap, bool
                         f_retireLiq(q, nowT, false)
                         array.remove(liqs, i)
 
-f_addSwing(int tf, bool isHigh, float price, int start, int nowT) =>
+f_addSwing(int tf, bool isHigh, float price, int start, int cap, int nowT) =>
     string nm   = tf == 1 ? (isHigh ? "Max 4H" : "Min 4H") : tf == 2 ? (isHigh ? "Max 1H" : "Min 1H") : (isHigh ? "Max 15M" : "Min 15M")
     int    rank = tf == 1 ? 3 : tf == 2 ? 2 : 1
     bool   sw   = tf == 1 ? sw4H : tf == 2 ? sw1H : sw15M
     bool   vis  = tf == 1 ? show4H : tf == 2 ? show1H : show15M
     color  col  = tf == 1 ? cLiq4 : tf == 2 ? cLiq1 : cLiq15
     string sty  = tf == 3 ? line.style_dashed : line.style_solid
-    f_addLiq(nm, rank, isHigh, price, start, liqPerTf, sw, vis, col, sty, nowT)
+    f_addLiq(nm, rank, isHigh, price, start, cap, sw, vis, col, sty, nowT)
 
 f_refresh(TfS s) =>
     s.takenH := not na(s.runH) and not na(s.prevH) and s.runH >= s.prevH
@@ -352,12 +355,17 @@ f_onTf(TfS s, int tf, int st, int sPD, int sCandle, float h, float l, float c, i
     s.runL      := na
     if not na(ph)
         s.swH := ph
-        if tf != 0
-            f_addSwing(tf, true, ph, f_findTime(ph, true, pvT0, pvT1), t1)
+        if tf == 3
+            f_addSwing(tf, true, ph, f_findTime(ph, true, pvT0, pvT1), liqPerTf, t1)
     if not na(pl)
         s.swL := pl
-        if tf != 0
-            f_addSwing(tf, false, pl, f_findTime(pl, false, pvT0, pvT1), t1)
+        if tf == 3
+            f_addSwing(tf, false, pl, f_findTime(pl, false, pvT0, pvT1), liqPerTf, t1)
+    // 4H y 1H: maximo y minimo de la ULTIMA vela cerrada (como PDH/PDL para el dia). Cada vela
+    // nueva sustituye a la anterior; antes eran pivotes que seguian vivos dias hasta ser barridos.
+    if tf == 1 or tf == 2
+        f_addSwing(tf, true,  h, f_findTime(h, true,  tw, t1), 1, t1)
+        f_addSwing(tf, false, l, f_findTime(l, false, tw, t1), 1, t1)
     if tf == 0
         f_addLiq("PDH", 4, true,  h, f_findTime(h, true,  tw, t1), 1, swPDHL, showPD, cLiqD, line.style_solid, t1)
         f_addLiq("PDL", 4, false, l, f_findTime(l, false, tw, t1), 1, swPDHL, showPD, cLiqD, line.style_solid, t1)
