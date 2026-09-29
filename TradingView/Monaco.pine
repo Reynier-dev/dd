@@ -1,0 +1,1062 @@
+//@version=6
+// MONACO - Proceso Set Up A+ (modelo Reynier) · TradingView
+// Port de la version NinjaTrader 8 (v7). Misma logica, mismas reglas.
+//
+//   1. Daily BIAS claro (PDCC)
+//   2. Toma de liquidez (15M / 1H / 4H / PDH-PDL)       <- ARMA el setup
+//   3. Reaccion a POI HT (FVG / OB / BB de 15M, 1H, 4H)
+//   4. A favor de la estructura (continuacion)
+//   5. Liquidez contraria (DOL, en la direccion del trade)
+//   6. IFVG (TF del grafico)
+//   7. CISD de 5M a favor + retesteo de su FVG
+//   8. SMT (MNQ vs MES)
+//
+// INDICES: todo dato de TF superior se lee con [1] + lookahead_on = ultima vela CERRADA, igual
+// en historico y en tiempo real. (La version Pine anterior usaba [1] con lookahead_off: en el
+// historico eso es la vela de ANTEAYER.)
+//
+// VELAS REALES: todo se calcula sobre ticker.standard(), asi que en Heiken Ashi / Renko el
+// modelo sigue viendo velas normales.
+//
+// NO VALIDADO: umbrales por convencion, sin optimizar ni probar fuera de muestra.
+// Contar confluencias no es lo mismo que tener ventaja. Solo visual, sin ordenes.
+
+indicator("MONACO", "MONACO", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ============================================================================
+//  INPUTS
+// ============================================================================
+g1 = "1. Daily BIAS (PDCC)"
+pdccMode   = input.string("Posición del cierre en el rango", "Método PDCC", options = ["Posición del cierre en el rango", "Cierre vs apertura del día", "Cierre vs cierre anterior", "Motor de score MTF"], group = g1)
+pdccZone   = input.float(0.66, "Umbral de tercio", minval = 0.5, maxval = 0.95, step = 0.01, group = g1)
+biasFilter = input.bool(true, "Filtro duro: descartar setups contra el bias", group = g1)
+
+g2 = "2. Motor MTF"
+pivD    = input.int(2, "Pivote D1", minval = 1, maxval = 10, group = g2)
+pivH4   = input.int(2, "Pivote H4", minval = 1, maxval = 10, group = g2)
+pivH1   = input.int(3, "Pivote H1", minval = 1, maxval = 10, group = g2)
+pivM15  = input.int(3, "Pivote 15M", minval = 1, maxval = 10, group = g2)
+rngLen  = input.int(20, "Barras del rango operativo", minval = 5, maxval = 200, group = g2)
+wStruct = input.int(2, "Peso estructura", minval = 0, maxval = 5, group = g2)
+wPD     = input.int(1, "Peso premium/discount", minval = 0, maxval = 5, group = g2)
+wCandle = input.int(1, "Peso última vela", minval = 0, maxval = 5, group = g2)
+wDraw   = input.int(1, "Peso draw on liquidity", minval = 0, maxval = 5, group = g2)
+biasThr = input.int(2, "Umbral de score para sesgo", minval = 1, maxval = 9, group = g2)
+
+g3 = "3. Toma de liquidez"
+setupWin   = input.int(30, "Ventana del setup (velas)", minval = 5, maxval = 200, group = g3)
+swPDHL     = input.bool(true, "Barrer PDH / PDL", group = g3)
+sw4H       = input.bool(true, "Barrer máx/mín 4H", group = g3)
+sw1H       = input.bool(true, "Barrer máx/mín 1H", group = g3)
+sw15M      = input.bool(true, "Barrer máx/mín 15M", group = g3)
+sweepPen   = input.float(0.10, "Penetración mínima (x ATR)", minval = 0.0, maxval = 2.0, step = 0.01, group = g3)
+sweepClose = input.bool(true, "Exigir cierre de vuelta dentro del nivel", group = g3)
+liqPerTf   = input.int(2, "Niveles vivos por TF y lado (1 = solo el último swing)", minval = 1, maxval = 5, group = g3)
+
+g4 = "4. POI HT (15M / 1H / 4H)"
+poiFvg     = input.bool(true, "FVG", group = g4)
+poiOb      = input.bool(true, "Order Block", group = g4)
+poiBb      = input.bool(true, "Breaker Block", group = g4)
+minFvgAtr  = input.float(0.25, "Tamaño mínimo del FVG (x ATR de su TF)", minval = 0.0, maxval = 3.0, step = 0.05, group = g4)
+maxPoiHtf  = input.int(3, "Zonas máximas por TF", minval = 1, maxval = 10, group = g4)
+poiAgeHtf  = input.int(60, "Edad máxima de una zona (velas de su TF)", minval = 5, maxval = 500, group = g4)
+reactLook  = input.int(5, "Reacción válida hasta N velas antes de la barrida", minval = 0, maxval = 50, group = g4)
+showHtfPoi = input.bool(true, "Dibujar zonas (la más cercana por TF y lado)", group = g4)
+
+g4b = "4b. IFVG (TF del gráfico)"
+maxFvg      = input.int(8, "FVG en seguimiento", minval = 2, maxval = 60, group = g4b)
+fvgAge      = input.int(120, "Edad máxima de un FVG (velas)", minval = 10, maxval = 1000, group = g4b)
+showIfvgBox = input.bool(true, "Dibujar IFVG (último por dirección + los de setups)", group = g4b)
+showAllFvg  = input.bool(false, "Depuración: dibujar todos los FVG", group = g4b)
+maxHistBox  = input.int(10, "IFVG de setups que se dejan dibujados", minval = 0, maxval = 100, group = g4b)
+
+g5 = "5. Estructura y DOL"
+structTf  = input.string("H1", "TF de referencia para continuación", options = ["H4", "H1", "15M"], group = g5)
+dolMaxAtr = input.float(8.0, "Distancia máx. al pool (x ATR)", minval = 1.0, maxval = 50.0, step = 0.5, group = g5)
+dolMinR   = input.float(2.0, "R mínimo hasta el pool", minval = 0.5, maxval = 10.0, step = 0.5, group = g5)
+
+g6 = "6. IFVG y CISD"
+showIfvgLbl = input.bool(false, "Etiqueta IFVG en la vela", group = g6)
+showCisd    = input.bool(true, "Marcar CISD", group = g6)
+cisdFirst   = input.bool(true, "Nivel CISD = apertura de la 1ª vela de la racha", group = g6)
+cisdMinRun  = input.int(3, "Velas mínimas en la racha (5M)", minval = 1, maxval = 10, group = g6)
+cisdDisp    = input.float(0.50, "Desplazamiento mínimo (cuerpo x ATR de 5M)", minval = 0.0, maxval = 3.0, step = 0.05, group = g6)
+cisdExpiry  = input.int(12, "Caducidad del nivel CISD (velas de 5M)", minval = 2, maxval = 100, group = g6)
+retestBars  = input.int(20, "Ventana de retesteo del FVG (velas de 5M)", minval = 2, maxval = 100, group = g6)
+
+g7 = "7. SMT"
+smtOn    = input.bool(true, "Activar SMT", group = g7)
+smtSymIn = input.string("", "Símbolo correlacionado (vacío = automático MNQ↔MES)", group = g7)
+
+g8 = "8. Niveles"
+showPD       = input.bool(true, "PDH / PDL", group = g8)
+show4H       = input.bool(true, "Máximo / Mínimo 4H", group = g8)
+show1H       = input.bool(true, "Máximo / Mínimo 1H", group = g8)
+show15M      = input.bool(true, "Máximo / Mínimo 15M", group = g8)
+lvlFwd       = input.int(18, "Extensión hacia la derecha (velas)", minval = 4, maxval = 200, group = g8)
+maxHistLines = input.int(10, "Barridas que se dejan dibujadas", minval = 0, maxval = 200, group = g8)
+showSweepLbl = input.bool(false, "Texto en cada barrida", group = g8)
+
+g9 = "9. Señal y panel"
+cleanMode    = input.bool(true, "Modo limpio (dibujar solo con setup armado)", group = g9)
+onlySignal   = input.bool(false, "Solo la señal final", group = g9)
+minScore     = input.int(6, "Confluencias mínimas para señal", minval = 3, maxval = 8, group = g9)
+needTrigger  = input.bool(true, "La señal exige el disparador CISD 5M + retesteo", group = g9)
+showPanel    = input.bool(true, "Mostrar panel", group = g9)
+panelPos     = input.string("Arriba izquierda", "Posición del panel", options = ["Arriba izquierda", "Arriba derecha", "Abajo izquierda", "Abajo derecha"], group = g9)
+panelCompact = input.bool(true, "Panel compacto (diagnóstico solo si algo falla)", group = g9)
+useAlerts    = input.bool(false, "Alertas", group = g9)
+
+// ============================================================================
+//  COLORES (siguen el tema del grafico: claro u oscuro)
+// ============================================================================
+cUp    = #2E8B57
+cDn    = #CD5C5C
+cNt    = #808080
+cOk    = #DAA520
+cFg    = chart.fg_color
+cLiqD  = cFg
+cLiq4  = color.new(cFg, 15)
+cLiq1  = color.new(cFg, 35)
+cLiq15 = color.new(cFg, 55)
+cBoxBg = color.new(cFg, 88)
+cFvgLn = color.new(cFg, 55)
+cObLn  = color.new(#708090, 20)
+cBbLn  = #DAA520
+cMid   = color.new(cFg, 50)
+cTag   = color.new(cFg, 25)
+cSmt   = color.new(cFg, 30)
+cClear = color.new(#000000, 100)
+
+// ============================================================================
+//  VELAS REALES Y ATR
+// ============================================================================
+isSynth   = chart.is_heikinashi or chart.is_renko or chart.is_linebreak or chart.is_kagi or chart.is_pnf
+stdTicker = ticker.standard(syminfo.tickerid)
+[so_, sh_, sl_, sc_] = request.security(stdTicker, timeframe.period, [open, high, low, close], lookahead = barmerge.lookahead_off)
+ro = isSynth ? so_ : open
+rh = isSynth ? sh_ : high
+rl = isSynth ? sl_ : low
+rc = isSynth ? sc_ : close
+
+trR  = na(rc[1]) ? rh - rl : math.max(rh - rl, math.abs(rh - rc[1]), math.abs(rl - rc[1]))
+atrM = ta.rma(trR, 14)
+
+chartSec = timeframe.in_seconds()
+tfms     = chartSec * 1000
+tfShort  = chartSec % 60 == 0 and chartSec < 86400 ? str.tostring(chartSec / 60) + "M" : timeframe.period
+
+// ============================================================================
+//  TIPOS
+// ============================================================================
+type Seq
+    int n = 0
+
+type TfS
+    int   lastT = na
+    int   st = 0
+    int   staticTot = 0
+    float prevH = na
+    float prevL = na
+    float lastC = na
+    float runH = na
+    float runL = na
+    bool  takenH = false
+    bool  takenL = false
+    int   sDraw = 0
+    int   tot = 0
+    float swH = na
+    float swL = na
+    int   nBars = 0
+
+type Liq
+    int    id
+    string nm
+    int    rank
+    bool   isHigh
+    float  price
+    int    start
+    bool   sweepable
+    bool   visible
+    color  col
+    string sty
+    line   ln = na
+    label  lb = na
+
+type Zone
+    int   id
+    int   tf
+    int   kind
+    bool  isBull
+    float top
+    float bot
+    int   start
+    int   born
+    box   bx = na
+    line  mid = na
+
+type Fvg
+    int   id
+    int   bi
+    int   start
+    bool  isBull
+    float top
+    float bot
+    bool  inv = false
+    bool  keep = false
+    box   bx = na
+    line  mid = na
+
+var Seq         sq       = Seq.new()
+var array<Liq>  liqs     = array.new<Liq>()
+var array<line> liqHist  = array.new<line>()
+var array<Zone> zones    = array.new<Zone>()
+var array<Fvg>  fvgs     = array.new<Fvg>()
+var array<box>  fvgHist  = array.new<box>()
+
+// Memoria de las ultimas velas del grafico (hora, maximo, minimo reales). Se consulta desde
+// funciones que no corren en todas las velas: con arrays no dependen del historial [] de Pine.
+var array<int>   bufT = array.new<int>()
+var array<float> bufH = array.new<float>()
+var array<float> bufL = array.new<float>()
+array.push(bufT, time)
+array.push(bufH, rh)
+array.push(bufL, rl)
+if array.size(bufT) > 1500
+    array.shift(bufT)
+    array.shift(bufH)
+    array.shift(bufL)
+
+// ============================================================================
+//  FUNCIONES
+// ============================================================================
+
+// Hora exacta (vela del grafico) en que se hizo un extremo dentro de una ventana [fromT, toT).
+// Asi la linea de liquidez nace en el swing real y no al cierre de la vela HTF.
+f_findTime(float price, bool isHigh, int fromT, int toT) =>
+    int res = na(fromT) ? (na(toT) ? time : toT) : fromT
+    if not na(fromT) and not na(toT)
+        int n = array.size(bufT)
+        if n > 0
+            for i = n - 1 to 0
+                int t = array.get(bufT, i)
+                if t < fromT
+                    break
+                if t < toT
+                    float v = isHigh ? array.get(bufH, i) : array.get(bufL, i)
+                    if math.abs(v - price) < syminfo.mintick * 0.5
+                        res := t
+                        break
+    res
+
+// Solo una BARRIDA deja la linea como historial, terminando en la vela que barrio. Rotos y
+// retirados por tope se borran (un rally que rompe 20 niveles formaba una escalera de ruido).
+f_retireLiq(Liq q, int endT, bool swept) =>
+    if not na(q.ln)
+        line.delete(q.ln)
+        q.ln := na
+    if not na(q.lb)
+        label.delete(q.lb)
+        q.lb := na
+    if swept and q.visible and maxHistLines > 0 and endT > q.start
+        array.push(liqHist, line.new(q.start, q.price, endT, q.price, xloc = xloc.bar_time, color = q.col, style = q.sty, width = 1))
+        if array.size(liqHist) > maxHistLines
+            line.delete(array.shift(liqHist))
+
+f_addLiq(string nm, int rank, bool isHigh, float price, int start, int cap, bool sweepable, bool visible, color col, string sty, int nowT) =>
+    if (sweepable or visible) and not na(price)
+        bool dup = false
+        for q in liqs
+            if q.nm == nm and math.abs(q.price - price) < syminfo.mintick * 0.5
+                dup := true
+        if not dup
+            sq.n += 1
+            array.push(liqs, Liq.new(sq.n, nm, rank, isHigh, price, na(start) ? nowT : start, sweepable, visible, col, sty))
+            int count = 0
+            for i = array.size(liqs) - 1 to 0
+                Liq q = array.get(liqs, i)
+                if q.nm == nm
+                    count += 1
+                    if count > cap
+                        f_retireLiq(q, nowT, false)
+                        array.remove(liqs, i)
+
+f_addSwing(int tf, bool isHigh, float price, int start, int nowT) =>
+    string nm   = tf == 1 ? (isHigh ? "Max 4H" : "Min 4H") : tf == 2 ? (isHigh ? "Max 1H" : "Min 1H") : (isHigh ? "Max 15M" : "Min 15M")
+    int    rank = tf == 1 ? 3 : tf == 2 ? 2 : 1
+    bool   sw   = tf == 1 ? sw4H : tf == 2 ? sw1H : sw15M
+    bool   vis  = tf == 1 ? show4H : tf == 2 ? show1H : show15M
+    color  col  = tf == 1 ? cLiq4 : tf == 2 ? cLiq1 : cLiq15
+    string sty  = tf == 3 ? line.style_dashed : line.style_solid
+    f_addLiq(nm, rank, isHigh, price, start, liqPerTf, sw, vis, col, sty, nowT)
+
+f_refresh(TfS s) =>
+    s.takenH := not na(s.runH) and not na(s.prevH) and s.runH >= s.prevH
+    s.takenL := not na(s.runL) and not na(s.prevL) and s.runL <= s.prevL
+    int d = 0
+    if s.takenH and not s.takenL
+        d := -1
+    else if s.takenL and not s.takenH
+        d := 1
+    else if not na(s.prevH) and not na(s.prevL) and not na(s.lastC)
+        d := (s.prevH - s.lastC) <= (s.lastC - s.prevL) ? 1 : -1
+    s.sDraw := d
+    s.tot := s.staticTot + d * wDraw
+
+f_track(TfS s) =>
+    s.runH := na(s.runH) ? rh : math.max(s.runH, rh)
+    s.runL := na(s.runL) ? rl : math.min(s.runL, rl)
+    f_refresh(s)
+
+f_dropZone(Zone z) =>
+    if not na(z.bx)
+        box.delete(z.bx)
+        z.bx := na
+    if not na(z.mid)
+        line.delete(z.mid)
+        z.mid := na
+
+f_zoneName(Zone z) =>
+    (z.kind == 0 ? "FVG" : z.kind == 1 ? "OB" : "BB") + " " + (z.tf == 1 ? "4H" : z.tf == 2 ? "1H" : "15M")
+
+// Se llama cuando aparece una vela HTF CERRADA nueva. [0] del TF = la que acaba de cerrar.
+f_onTf(TfS s, int tf, int st, int sPD, int sCandle, float h, float l, float c, int t0, int tw, int t1, float ph, float pl, int pvT0, int pvT1, int gapDir, float gTop, float gBot, int gStart, float obTop, float obBot, int obStart) =>
+    s.lastT     := t0
+    s.nBars     += 1
+    s.st        := st
+    s.staticTot := st * wStruct + sPD * wPD + sCandle * wCandle
+    s.prevH     := h
+    s.prevL     := l
+    s.lastC     := c
+    s.runH      := na
+    s.runL      := na
+    if not na(ph)
+        s.swH := ph
+        if tf != 0
+            f_addSwing(tf, true, ph, f_findTime(ph, true, pvT0, pvT1), t1)
+    if not na(pl)
+        s.swL := pl
+        if tf != 0
+            f_addSwing(tf, false, pl, f_findTime(pl, false, pvT0, pvT1), t1)
+    if tf == 0
+        f_addLiq("PDH", 4, true,  h, f_findTime(h, true,  tw, t1), 1, swPDHL, showPD, cLiqD, line.style_solid, t1)
+        f_addLiq("PDL", 4, false, l, f_findTime(l, false, tw, t1), 1, swPDHL, showPD, cLiqD, line.style_solid, t1)
+    else
+        // Zonas de este TF: primero se actualizan con el cierre de esta vela...
+        if array.size(zones) > 0
+            for i = array.size(zones) - 1 to 0
+                Zone z = array.get(zones, i)
+                if z.tf == tf
+                    bool drop = s.nBars - z.born > poiAgeHtf
+                    if not drop
+                        bool brokeDn = c < z.bot
+                        bool brokeUp = c > z.top
+                        if z.kind == 1 and ((z.isBull and brokeDn) or (not z.isBull and brokeUp))
+                            // OB roto por cierre: pasa a Breaker de polaridad contraria
+                            if poiBb
+                                z.kind   := 2
+                                z.isBull := not z.isBull
+                            else
+                                drop := true
+                        else if (z.isBull and brokeDn) or (not z.isBull and brokeUp)
+                            drop := true
+                    if drop
+                        f_dropZone(z)
+                        array.remove(zones, i)
+        // ...despues se anaden las nuevas
+        if gapDir != 0
+            bool bull = gapDir > 0
+            if poiFvg
+                sq.n += 1
+                array.push(zones, Zone.new(sq.n, tf, 0, bull, gTop, gBot, gStart, s.nBars))
+            if (poiOb or poiBb) and not na(obTop)
+                sq.n += 1
+                array.push(zones, Zone.new(sq.n, tf, 1, bull, obTop, obBot, obStart, s.nBars))
+        int cnt = 0
+        if array.size(zones) > 0
+            for i = array.size(zones) - 1 to 0
+                Zone z = array.get(zones, i)
+                if z.tf == tf
+                    cnt += 1
+                    if cnt > maxPoiHtf
+                        f_dropZone(z)
+                        array.remove(zones, i)
+    f_refresh(s)
+
+// Motor de un TF superior. Se evalua DENTRO de request.security y devuelve todo con [1]:
+// con lookahead_on eso es la ultima vela CERRADA, sin mirar al futuro.
+f_htf(int pivLen, int rLen, float minA) =>
+    float ph = ta.pivothigh(high, pivLen, pivLen)
+    float pl = ta.pivotlow(low, pivLen, pivLen)
+    var float refH = na
+    var float refL = na
+    var int   st   = 0
+    if not na(ph)
+        refH := ph
+    if not na(pl)
+        refL := pl
+    if not na(refH) and close > refH
+        st   := 1
+        refH := na
+    if not na(refL) and close < refL
+        st   := -1
+        refL := na
+    float eq      = (ta.highest(high, rLen) + ta.lowest(low, rLen)) / 2
+    int   sPD     = close < eq ? 1 : close > eq ? -1 : 0
+    float rg      = math.max(high - low, syminfo.mintick)
+    float pos     = (close - low) / rg
+    bool  swLo    = low < low[1] and close > low[1]
+    bool  swHi    = high > high[1] and close < high[1]
+    int   sCandle = swLo ? 1 : swHi ? -1 : pos >= 0.66 ? 1 : pos <= 0.34 ? -1 : 0
+    float a       = ta.atr(14)
+    float minSz   = nz(a) * minA
+    bool  bullGap = low > high[2] and (low - high[2]) >= minSz
+    bool  bearGap = high < low[2] and (low[2] - high) >= minSz
+    int   gapDir  = bullGap ? 1 : bearGap ? -1 : 0
+    float gTop    = bullGap ? low : bearGap ? low[2] : na
+    float gBot    = bullGap ? high[2] : bearGap ? high : na
+    int   obOff   = -1
+    if gapDir != 0
+        for k = 2 to 12
+            bool opp = gapDir > 0 ? close[k] < open[k] : close[k] > open[k]
+            if opp
+                obOff := k
+                break
+    float obTop   = na
+    float obBot   = na
+    int   obStart = na
+    if obOff > 0
+        obTop   := gapDir > 0 ? math.max(open[obOff], close[obOff]) : high[obOff]
+        obBot   := gapDir > 0 ? low[obOff] : math.min(open[obOff], close[obOff])
+        obStart := time[obOff]
+    int pvT0 = time_close[pivLen + 1]
+    int pvT1 = time_close[pivLen]
+    [st[1], sPD[1], sCandle[1], open[1], high[1], low[1], close[1], close[2], time[1], time_close[2], time_close[1], ph[1], pl[1], pvT0[1], pvT1[1], gapDir[1], gTop[1], gBot[1], time[2], obTop[1], obBot[1], obStart[1]]
+
+// CISD + retesteo del FVG que deja su desplazamiento. Se evalua en velas de 5M.
+f_cisd(int minRun, float disp, int expiry, int rtBars, float minA, bool first) =>
+    var int   runDir     = 0
+    var float runOpen    = na
+    var int   runLen     = 0
+    var float bullLvl    = na
+    var int   bullBar    = 0
+    var int   bullStartT = na
+    var float bearLvl    = na
+    var int   bearBar    = 0
+    var int   bearStartT = na
+    var int   cUpBar     = -100000
+    var int   cDnBar     = -100000
+    var float rtUpTop    = na
+    var float rtUpBot    = na
+    var float rtDnTop    = na
+    var float rtDnBot    = na
+    float a = ta.atr(14)
+    if close > open
+        if runDir == 1
+            runLen += 1
+        else
+            if runDir == -1 and runLen >= minRun
+                bullLvl    := first ? runOpen : open[1]
+                bullBar    := bar_index
+                bullStartT := first ? time[runLen] : time[1]
+            runDir  := 1
+            runOpen := open
+            runLen  := 1
+    else if close < open
+        if runDir == -1
+            runLen += 1
+        else
+            if runDir == 1 and runLen >= minRun
+                bearLvl    := first ? runOpen : open[1]
+                bearBar    := bar_index
+                bearStartT := first ? time[runLen] : time[1]
+            runDir  := -1
+            runOpen := open
+            runLen  := 1
+    if not na(bullLvl) and bar_index - bullBar > expiry
+        bullLvl := na
+    if not na(bearLvl) and bar_index - bearBar > expiry
+        bearLvl := na
+    // Desplazamiento obligatorio: un cierre sin cuerpo no es cambio de entrega
+    float bodyA = math.abs(close - open) / math.max(nz(a), syminfo.mintick)
+    bool  upEv  = false
+    bool  dnEv  = false
+    float fLvl  = na
+    int   fT    = na
+    if not na(bullLvl) and close > bullLvl and bodyA >= disp
+        upEv    := true
+        fLvl    := bullLvl
+        fT      := bullStartT
+        bullLvl := na
+    if not na(bearLvl) and close < bearLvl and bodyA >= disp
+        dnEv    := true
+        fLvl    := bearLvl
+        fT      := bearStartT
+        bearLvl := na
+    if upEv
+        cUpBar  := bar_index
+        rtUpTop := na
+        rtUpBot := na
+    if dnEv
+        cDnBar  := bar_index
+        rtDnTop := na
+        rtDnBot := na
+    float minSz = nz(a) * minA
+    bool  bGap  = low > high[2] and (low - high[2]) >= minSz
+    bool  sGap  = high < low[2] and (low[2] - high) >= minSz
+    if bGap and bar_index - cUpBar <= rtBars and na(rtUpTop)
+        rtUpTop := low
+        rtUpBot := high[2]
+    if sGap and bar_index - cDnBar <= rtBars and na(rtDnTop)
+        rtDnTop := low[2]
+        rtDnBot := high
+    bool rUp = not na(rtUpTop) and low <= rtUpTop and close > rtUpBot and bar_index - cUpBar <= rtBars
+    bool rDn = not na(rtDnTop) and high >= rtDnBot and close < rtDnTop and bar_index - cDnBar <= rtBars
+    [upEv, dnEv, rUp, rDn, fLvl, fT, time, time_close]
+
+f_cisdShift(int minRun, float disp, int expiry, int rtBars, float minA, bool first) =>
+    [a1, a2, a3, a4, a5, a6, a7, a8] = f_cisd(minRun, disp, expiry, rtBars, minA, first)
+    [a1[1], a2[1], a3[1], a4[1], a5[1], a6[1], a7[1], a8[1]]
+
+f_bias(float o, float h, float l, float c, float pc, int dTot) =>
+    float rg  = math.max(h - l, syminfo.mintick)
+    float pos = (c - l) / rg
+    int    dir = 0
+    string why = ""
+    if pdccMode == "Posición del cierre en el rango"
+        dir := pos >= pdccZone ? 1 : pos <= 1.0 - pdccZone ? -1 : 0
+        why := "cierre D-1 al " + str.tostring(math.round(pos * 100)) + "% de su rango"
+    else if pdccMode == "Cierre vs apertura del día"
+        dir := c > o ? 1 : c < o ? -1 : 0
+        why := "vela D-1 " + (c > o ? "alcista" : c < o ? "bajista" : "doji")
+    else if pdccMode == "Cierre vs cierre anterior"
+        dir := na(pc) ? 0 : c > pc ? 1 : c < pc ? -1 : 0
+        why := "cierre D-1 vs D-2"
+    else
+        dir := dTot >= biasThr ? 1 : dTot <= -biasThr ? -1 : 0
+        why := "score MTF " + str.tostring(dTot)
+    [dir, why]
+
+f_dirTxt(int d) => d > 0 ? "ALCISTA" : d < 0 ? "BAJISTA" : "NEUTRAL"
+f_dirOf(int t) => t >= biasThr ? 1 : t <= -biasThr ? -1 : 0
+f_arrow(int v) => v > 0 ? "A" : v < 0 ? "B" : "-"
+
+f_nearestLiq(bool above, float px) =>
+    float best = na
+    for q in liqs
+        if above and q.isHigh and q.price > px and (na(best) or q.price < best)
+            best := q.price
+        if not above and not q.isHigh and q.price < px and (na(best) or q.price > best)
+            best := q.price
+    best
+
+f_retireFvg(Fvg f, int endT) =>
+    if not na(f.bx)
+        box.delete(f.bx)
+        f.bx := na
+    if not na(f.mid)
+        line.delete(f.mid)
+        f.mid := na
+    // Solo los IFVG que contaron para un setup quedan como historial
+    if f.keep and showIfvgBox and maxHistBox > 0 and endT > f.start
+        color ln = f.isBull ? cDn : cUp
+        array.push(fvgHist, box.new(f.start, f.top, endT, f.bot, xloc = xloc.bar_time, border_color = ln, bgcolor = cBoxBg, text = "IFVG " + tfShort + (f.isBull ? " ▼" : " ▲"), text_size = size.tiny, text_color = ln, text_halign = text.align_left, text_valign = text.align_top))
+        if array.size(fvgHist) > maxHistBox
+            box.delete(array.shift(fvgHist))
+
+// ============================================================================
+//  DATOS DE TF SUPERIORES (todo sobre velas reales)
+// ============================================================================
+[dSt, dPD, dCd, dO, dH, dL, dC, dPC, dT0, dTw, dT1, dPh, dPl, dPvT0, dPvT1, dGap, dGT, dGB, dGS, dOT, dOB, dOS] = request.security(stdTicker, "D", f_htf(pivD, rngLen, minFvgAtr), lookahead = barmerge.lookahead_on)
+[aSt, aPD, aCd, aO, aH, aL, aC, aPC, aT0, aTw, aT1, aPh, aPl, aPvT0, aPvT1, aGap, aGT, aGB, aGS, aOT, aOB, aOS] = request.security(stdTicker, "240", f_htf(pivH4, rngLen, minFvgAtr), lookahead = barmerge.lookahead_on)
+[bSt, bPD, bCd, bO, bH, bL, bC, bPC, bT0, bTw, bT1, bPh, bPl, bPvT0, bPvT1, bGap, bGT, bGB, bGS, bOT, bOB, bOS] = request.security(stdTicker, "60", f_htf(pivH1, rngLen, minFvgAtr), lookahead = barmerge.lookahead_on)
+[mSt, mPD, mCd, mO, mH, mL, mC, mPC, mT0, mTw, mT1, mPh, mPl, mPvT0, mPvT1, mGap, mGT, mGB, mGS, mOT, mOB, mOS] = request.security(stdTicker, "15", f_htf(pivM15, rngLen, minFvgAtr), lookahead = barmerge.lookahead_on)
+
+// Vela diaria EN CURSO / recien terminada: solo para el panel y el PDH/PDL cuando el mercado
+// esta cerrado (fin de semana). Nunca se usa para el modelo en velas pasadas.
+[dO0, dH0, dL0, dC0, dPC0, dTw0] = request.security(stdTicker, "D", [open, high, low, close, close[1], time_close[1]], lookahead = barmerge.lookahead_on)
+
+// CISD de 5M: en las propias velas si el grafico ya es 5M real; si no, serie de 5M.
+cisdDirect = not isSynth and chartSec == 300
+cisdTf     = chartSec <= 300 ? "5" : timeframe.period
+[dcUp, dcDn, drUp, drDn, dcLvl, dcLvlT, dcT, dcTc] = f_cisd(cisdMinRun, cisdDisp, cisdExpiry, retestBars, minFvgAtr, cisdFirst)
+[scUp, scDn, srUp, srDn, scLvl, scLvlT, scT, scTc] = request.security(stdTicker, cisdTf, f_cisdShift(cisdMinRun, cisdDisp, cisdExpiry, retestBars, minFvgAtr, cisdFirst), lookahead = barmerge.lookahead_on)
+
+// SMT: la otra pata del par, con el mismo feed que el grafico (evita la trampa _DL)
+smtOther  = syminfo.root == "MES" ? "MNQ" : "MES"
+smtTicker = str.length(smtSymIn) > 0 ? smtSymIn : syminfo.prefix + ":" + smtOther + "1!"
+[mh, ml]  = request.security(smtTicker, timeframe.period, [high, low], lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+smtOk     = smtOn and not na(mh) and not na(ml)
+mph       = ta.pivothigh(mh, pivM15, pivM15)
+mpl       = ta.pivotlow(ml, pivM15, pivM15)
+
+// ============================================================================
+//  ESTADO POR TF: se actualiza al aparecer cada vela HTF cerrada
+// ============================================================================
+var TfS sD   = TfS.new()
+var TfS sH4  = TfS.new()
+var TfS sH1  = TfS.new()
+var TfS sM15 = TfS.new()
+
+if not na(dT0) and (na(sD.lastT) or dT0 != sD.lastT)
+    f_onTf(sD, 0, dSt, dPD, dCd, dH, dL, dC, dT0, dTw, dT1, dPh, dPl, dPvT0, dPvT1, dGap, dGT, dGB, dGS, dOT, dOB, dOS)
+if not na(aT0) and (na(sH4.lastT) or aT0 != sH4.lastT)
+    f_onTf(sH4, 1, aSt, aPD, aCd, aH, aL, aC, aT0, aTw, aT1, aPh, aPl, aPvT0, aPvT1, aGap, aGT, aGB, aGS, aOT, aOB, aOS)
+if not na(bT0) and (na(sH1.lastT) or bT0 != sH1.lastT)
+    f_onTf(sH1, 2, bSt, bPD, bCd, bH, bL, bC, bT0, bTw, bT1, bPh, bPl, bPvT0, bPvT1, bGap, bGT, bGB, bGS, bOT, bOB, bOS)
+if not na(mT0) and (na(sM15.lastT) or mT0 != sM15.lastT)
+    f_onTf(sM15, 3, mSt, mPD, mCd, mH, mL, mC, mT0, mTw, mT1, mPh, mPl, mPvT0, mPvT1, mGap, mGT, mGB, mGS, mOT, mOB, mOS)
+
+// Recorrido de la vela HTF en formacion (para "PDH barrido" y el draw on liquidity)
+f_track(sD)
+f_track(sH4)
+f_track(sH1)
+f_track(sM15)
+
+structRef = structTf == "H4" ? sH4.st : structTf == "H1" ? sH1.st : sM15.st
+
+// Basta 1 vela diaria cerrada y 2 de cada TF intradia (antes se exigian 3 diarias y con pocos
+// dias cargados el modelo solo evaluaba el ultimo dia sin avisar)
+htfReady = sD.nBars >= 1 and sH4.nBars >= 2 and sH1.nBars >= 2 and sM15.nBars >= 2
+modelOn  = htfReady and bar_index >= 30 and not na(atrM) and atrM > 0
+
+// Paso 1: bias del modelo en cada vela = la ultima diaria CERRADA antes de esa vela
+[biasDir, biasWhy] = f_bias(dO, dH, dL, dC, dPC, sD.tot)
+
+// ============================================================================
+//  MODELO
+// ============================================================================
+var int    lastReactUpBar = -100000
+var int    lastReactDnBar = -100000
+var string lastReactUpNm  = ""
+var string lastReactDnNm  = ""
+
+var int    sDir     = 0
+var int    sBar     = 0
+var int    sArmT    = na
+var string sSweepNm = ""
+var string k3Name   = ""
+var bool   k1 = false
+var bool   k2 = false
+var bool   k3 = false
+var bool   k4 = false
+var bool   k5 = false
+var bool   k6 = false
+var bool   k7 = false
+var bool   k8 = false
+var float  sR       = na
+var bool   fired    = false
+var int    nSetups  = 0
+var int    nSignals = 0
+var int    lastSetBar  = na
+var int    firstModelT = na
+var float  smtSwH   = na
+var float  smtSwL   = na
+var int    lastSmtFrom = na
+
+var bool pendRtUp  = false
+var bool pendRtDn  = false
+var int  pendRtUpT = na
+var int  pendRtDnT = na
+var int  lastCisdT = na
+
+f_score() => (k1 ? 1 : 0) + (k2 ? 1 : 0) + (k3 ? 1 : 0) + (k4 ? 1 : 0) + (k5 ? 1 : 0) + (k6 ? 1 : 0) + (k7 ? 1 : 0) + (k8 ? 1 : 0)
+
+f_missing() =>
+    string m = ""
+    m += k1 ? "" : " BIAS"
+    m += k2 ? "" : " LIQ"
+    m += k3 ? "" : " POI"
+    m += k4 ? "" : " EST"
+    m += k5 ? "" : " DOL"
+    m += k6 ? "" : " IFVG"
+    m += k7 ? "" : " CISD"
+    m += k8 ? "" : " SMT"
+    m == "" ? "completo" : "falta:" + m
+
+// ---- Eventos del CISD de 5M (se consumen una sola vez por vela de 5M) ----
+bool cNew = cisdDirect or (not na(scT) and (na(lastCisdT) or scT != lastCisdT))
+if not cisdDirect and cNew
+    lastCisdT := scT
+eCUp  = cNew and (cisdDirect ? dcUp : scUp)
+eCDn  = cNew and (cisdDirect ? dcDn : scDn)
+eRUp  = cNew and (cisdDirect ? drUp : srUp)
+eRDn  = cNew and (cisdDirect ? drDn : srDn)
+eLvl  = cisdDirect ? dcLvl : scLvl
+eLvlT = cisdDirect ? dcLvlT : scLvlT
+eT    = cisdDirect ? time : scT
+eTc   = cisdDirect ? time_close : scTc
+if eRUp
+    pendRtUp  := true
+    pendRtUpT := eTc
+if eRDn
+    pendRtDn  := true
+    pendRtDnT := eTc
+
+Liq sweptUp  = na
+Liq sweptDn  = na
+bool reactUp  = false
+bool reactDn  = false
+bool ifvgBull = false
+bool ifvgBear = false
+Fvg invBull   = na
+Fvg invBear   = na
+bool sigLong  = false
+bool sigShort = false
+
+if modelOn
+    if na(firstModelT)
+        firstModelT := time
+
+    // ---- Paso 2: toma de liquidez. Un nivel se CONSUME al superarlo: cierre de vuelta
+    //      dentro = barrida; cierre al otro lado = ruptura. Cuenta el de mas rango. ----
+    if array.size(liqs) > 0
+        float pen = atrM * sweepPen
+        for i = array.size(liqs) - 1 to 0
+            Liq q = array.get(liqs, i)
+            if q.start < time
+                bool taken = q.isHigh ? rh > q.price + pen : rl < q.price - pen
+                if taken
+                    bool swept = not sweepClose or (q.isHigh ? rc < q.price : rc > q.price)
+                    if swept and q.sweepable
+                        if q.isHigh
+                            if na(sweptUp) or q.rank > sweptUp.rank
+                                sweptUp := q
+                        else
+                            if na(sweptDn) or q.rank > sweptDn.rank
+                                sweptDn := q
+                    f_retireLiq(q, time, swept)
+                    array.remove(liqs, i)
+
+    // ---- Paso 3: reaccion a POI HT (entra en la zona y cierra rechazando) ----
+    if array.size(zones) > 0
+        Zone bu = na
+        Zone bd = na
+        for z in zones
+            if z.start < time and not (z.kind == 1 and not poiOb)
+                if rl <= z.top and rh >= z.bot
+                    float mid = (z.top + z.bot) / 2
+                    if z.isBull and rc > mid and rc > ro
+                        if na(bu) or z.tf < bu.tf
+                            bu := z
+                    else if not z.isBull and rc < mid and rc < ro
+                        if na(bd) or z.tf < bd.tf
+                            bd := z
+        if not na(bu)
+            reactUp        := true
+            lastReactUpBar := bar_index
+            lastReactUpNm  := f_zoneName(bu)
+        if not na(bd)
+            reactDn        := true
+            lastReactDnBar := bar_index
+            lastReactDnNm  := f_zoneName(bd)
+
+    // ---- Paso 6: FVG del grafico e IFVG (inversion POR CIERRE) ----
+    float minSz = atrM * minFvgAtr
+    if rl > rh[2] and (rl - rh[2]) >= minSz
+        sq.n += 1
+        array.push(fvgs, Fvg.new(sq.n, bar_index, time[1], true, rl, rh[2]))
+    if rh < rl[2] and (rl[2] - rh) >= minSz
+        sq.n += 1
+        array.push(fvgs, Fvg.new(sq.n, bar_index, time[1], false, rl[2], rh))
+    while array.size(fvgs) > maxFvg
+        f_retireFvg(array.shift(fvgs), time)
+    if array.size(fvgs) > 0
+        for i = array.size(fvgs) - 1 to 0
+            Fvg f = array.get(fvgs, i)
+            bool drop = bar_index - f.bi > fvgAge
+            if not drop
+                if not f.inv
+                    if f.isBull and rc < f.bot
+                        f.inv    := true
+                        ifvgBear := true
+                        invBear  := f
+                    else if not f.isBull and rc > f.top
+                        f.inv    := true
+                        ifvgBull := true
+                        invBull  := f
+                else
+                    if f.isBull and rc > f.top
+                        drop := true
+                    if not f.isBull and rc < f.bot
+                        drop := true
+            if drop
+                f_retireFvg(f, time)
+                array.remove(fvgs, i)
+
+    // ---- Maquina de estados ----
+    bool newLong  = not na(sweptDn) and (not biasFilter or biasDir >= 0)
+    bool newShort = not na(sweptUp) and (not biasFilter or biasDir <= 0)
+    if newLong or newShort
+        Liq sw = newLong ? sweptDn : sweptUp
+        sDir     := newLong ? 1 : -1
+        sBar     := bar_index
+        sArmT    := time_close
+        sSweepNm := sw.nm
+        k1 := newLong ? biasDir > 0 : biasDir < 0
+        k2 := true
+        k3 := newLong ? bar_index - lastReactUpBar <= reactLook : bar_index - lastReactDnBar <= reactLook
+        k3Name := k3 ? (newLong ? lastReactUpNm : lastReactDnNm) : ""
+        k4 := newLong ? structRef > 0 : structRef < 0
+        k6 := false
+        k7 := false
+        // Paso 8: MES NO confirma el extremo en la MISMA vela, contra su swing previo
+        k8 := smtOk and (newLong ? (not na(smtSwL) and ml >= smtSwL) : (not na(smtSwH) and mh <= smtSwH))
+        fired := false
+        if k8 and (na(lastSmtFrom) or sw.start != lastSmtFrom) and sw.start < time
+            lastSmtFrom := sw.start
+            float toPx = newLong ? rl : rh
+            line.new(sw.start, sw.price, time, toPx, xloc = xloc.bar_time, color = cSmt, width = 1)
+            label.new(sw.start + (time - sw.start) / 2, (sw.price + toPx) / 2, "SMT", xloc = xloc.bar_time, style = newLong ? label.style_label_up : label.style_label_down, color = cClear, textcolor = cSmt, size = size.small)
+        // Paso 5: liquidez viva mas cercana EN LA DIRECCION del trade
+        float dol  = f_nearestLiq(newLong, rc)
+        float risk = math.max(math.abs(rc - (newLong ? rl : rh)), atrM * 0.25)
+        sR := na(dol) ? na : math.abs(dol - rc) / risk
+        k5 := not na(dol) and math.abs(dol - rc) <= atrM * dolMaxAtr and sR >= dolMinR
+        nSetups    += 1
+        lastSetBar := bar_index
+
+    if sDir != 0 and bar_index - sBar > setupWin
+        sDir := 0
+
+    // Retesteo del CISD de 5M: solo cuenta si ocurrio en o despues de la barrida
+    bool rtUp = pendRtUp and not na(sArmT) and not na(pendRtUpT) and pendRtUpT >= sArmT
+    bool rtDn = pendRtDn and not na(sArmT) and not na(pendRtDnT) and pendRtDnT >= sArmT
+    pendRtUp := false
+    pendRtDn := false
+
+    if sDir > 0
+        if not k3 and reactUp
+            k3     := true
+            k3Name := lastReactUpNm
+        k4 := k4 or structRef > 0
+        if ifvgBull
+            k6 := true
+            if not na(invBull)
+                invBull.keep := true
+        k7 := k7 or rtUp
+    else if sDir < 0
+        if not k3 and reactDn
+            k3     := true
+            k3Name := lastReactDnNm
+        k4 := k4 or structRef < 0
+        if ifvgBear
+            k6 := true
+            if not na(invBear)
+                invBear.keep := true
+        k7 := k7 or rtDn
+
+    int  score = f_score()
+    bool trig  = k7 or not needTrigger
+    sigLong  := sDir > 0 and trig and score >= minScore and not fired
+    sigShort := sDir < 0 and trig and score >= minScore and not fired
+    if sigLong or sigShort
+        fired    := true
+        nSignals += 1
+
+// Swings de MES: se actualizan DESPUES de comprobar el SMT de esta vela
+if not na(mph)
+    smtSwH := mph
+if not na(mpl)
+    smtSwL := mpl
+
+// ============================================================================
+//  DIBUJO DE EVENTOS
+// ============================================================================
+if sigLong or sigShort
+    int   sc = f_score()
+    color bc = sc == 8 ? cOk : sigLong ? cUp : cDn
+    label.new(bar_index, sigLong ? rl : rh, (sigLong ? "COMPRA " : "VENTA ") + str.tostring(sc) + "/8\n" + f_missing(), yloc = sigLong ? yloc.belowbar : yloc.abovebar, style = sigLong ? label.style_label_up : label.style_label_down, color = bc, textcolor = color.white, size = size.small)
+
+if not onlySignal
+    bool gateUp = not cleanMode or sDir > 0
+    bool gateDn = not cleanMode or sDir < 0
+    if showSweepLbl and not na(sweptUp)
+        label.new(bar_index, rh, "x " + sweptUp.nm, yloc = yloc.abovebar, style = label.style_none, textcolor = cLiq1, size = size.tiny)
+    if showSweepLbl and not na(sweptDn)
+        label.new(bar_index, rl, "x " + sweptDn.nm, yloc = yloc.belowbar, style = label.style_none, textcolor = cLiq1, size = size.tiny)
+    if showIfvgLbl and ifvgBull and gateUp
+        label.new(bar_index, rl, "IFVG", yloc = yloc.belowbar, style = label.style_none, textcolor = cUp, size = size.tiny)
+    if showIfvgLbl and ifvgBear and gateDn
+        label.new(bar_index, rh, "IFVG", yloc = yloc.abovebar, style = label.style_none, textcolor = cDn, size = size.tiny)
+    // CISD = el NIVEL que se rompio, desde el inicio de la racha; texto al inicio de la linea
+    if showCisd and (eCUp or eCDn) and not na(eLvl) and not na(eLvlT)
+        bool dUp = eCUp and gateUp
+        bool dDn = eCDn and gateDn
+        if dUp or dDn
+            color br = dUp ? cUp : cDn
+            line.new(eLvlT, eLvl, eT, eLvl, xloc = xloc.bar_time, color = br, width = 2)
+            label.new(eLvlT, eLvl, "CISD 5M", xloc = xloc.bar_time, style = dUp ? label.style_label_lower_left : label.style_label_upper_left, color = cClear, textcolor = br, size = size.small)
+
+if useAlerts and (sigLong or sigShort)
+    alert("MONACO " + syminfo.ticker + " · " + (sigLong ? "COMPRA " : "VENTA ") + str.tostring(f_score()) + "/8 · " + f_missing(), alert.freq_once_per_bar_close)
+
+// ============================================================================
+//  DIBUJO EN VIVO: solo lo siguiente arriba y abajo (en la ultima vela)
+// ============================================================================
+if barstate.islast
+    int  fwdL     = time + lvlFwd * tfms
+    int  fwdB     = time + math.max(2, lvlFwd / 2) * tfms
+    bool nextSess = timenow >= time_close("D")
+
+    // Mercado cerrado: el dia que acaba de terminar es el D-1 de la proxima sesion
+    if nextSess and not na(dH0)
+        f_addLiq("PDH", 4, true,  dH0, f_findTime(dH0, true,  dTw0, time_close("D")), 1, swPDHL, showPD, cLiqD, line.style_solid, time)
+        f_addLiq("PDL", 4, false, dL0, f_findTime(dL0, false, dTw0, time_close("D")), 1, swPDHL, showPD, cLiqD, line.style_solid, time)
+
+    // ---- Liquidez: PDH/PDL siempre; del resto, el nivel mas cercano de cada fuente ----
+    for q in liqs
+        if not na(q.ln)
+            line.delete(q.ln)
+            q.ln := na
+        if not na(q.lb)
+            label.delete(q.lb)
+            q.lb := na
+    array<Liq>   shown   = array.new<Liq>()
+    array<float> shownPx = array.new<float>()
+    for q in liqs
+        bool sel = false
+        if q.visible
+            sel := true
+            if q.rank != 4
+                for o in liqs
+                    if o.nm == q.nm and math.abs(o.price - rc) < math.abs(q.price - rc)
+                        sel := false
+        if sel
+            q.ln := line.new(q.start, q.price, fwdL, q.price, xloc = xloc.bar_time, color = q.col, style = q.sty, width = 1)
+            array.push(shown, q)
+            array.push(shownPx, q.price)
+    // Niveles casi al mismo precio comparten UNA etiqueta ("Min 1H · PDL")
+    if array.size(shown) > 0
+        array<int> idx = array.sort_indices(shownPx, order.ascending)
+        float tol = atrM * 0.15
+        int gi = 0
+        while gi < array.size(idx)
+            Liq    head = array.get(shown, array.get(idx, gi))
+            string txt  = head.nm
+            int    gj   = gi
+            while gj + 1 < array.size(idx) and array.get(shownPx, array.get(idx, gj + 1)) - head.price <= tol
+                gj  += 1
+                txt += " · " + array.get(shown, array.get(idx, gj)).nm
+            head.lb := label.new(fwdL, head.price, txt, xloc = xloc.bar_time, style = label.style_label_left, color = cClear, textcolor = head.col, size = size.small)
+            gi := gj + 1
+
+    // ---- POI HT: por TF, la zona de soporte mas cercana por debajo y la de resistencia
+    //      mas cercana por encima; la etiqueta va dentro de la caja, a la derecha ----
+    for z in zones
+        f_dropZone(z)
+    if showHtfPoi
+        for tfi = 1 to 3
+            Zone zb = na
+            Zone zr = na
+            for z in zones
+                if z.tf == tfi and not (z.kind == 1 and not poiOb)
+                    if z.isBull and z.bot <= rc
+                        if na(zb) or z.top > zb.top
+                            zb := z
+                    else if not z.isBull and z.top >= rc
+                        if na(zr) or z.bot < zr.bot
+                            zr := z
+            for k = 0 to 1
+                Zone z = k == 0 ? zb : zr
+                if not na(z)
+                    color ln = z.kind == 0 ? cFvgLn : z.kind == 1 ? cObLn : cBbLn
+                    z.bx := box.new(z.start, z.top, fwdB, z.bot, xloc = xloc.bar_time, border_color = ln, bgcolor = cBoxBg, text = f_zoneName(z) + (z.isBull ? " ▲" : " ▼"), text_size = size.tiny, text_color = z.kind == 2 ? cBbLn : cTag, text_halign = text.align_right, text_valign = text.align_top)
+                    if z.kind == 0
+                        float mid = (z.top + z.bot) / 2
+                        z.mid := line.new(z.start, mid, fwdB, mid, xloc = xloc.bar_time, color = cMid, style = line.style_dashed, width = 1)
+
+    // ---- IFVG del grafico: el ultimo activo en cada direccion y los de setups ----
+    int lastBullId = -1
+    int lastBearId = -1
+    for f in fvgs
+        if f.inv
+            if f.isBull
+                lastBearId := math.max(lastBearId, f.id)
+            else
+                lastBullId := math.max(lastBullId, f.id)
+    for f in fvgs
+        if not na(f.bx)
+            box.delete(f.bx)
+            f.bx := na
+        if not na(f.mid)
+            line.delete(f.mid)
+            f.mid := na
+        bool show = showIfvgBox and (showAllFvg or f.keep or f.id == lastBullId or f.id == lastBearId)
+        if show
+            color  ln  = f.inv ? (f.isBull ? cDn : cUp) : cFvgLn
+            string txt = f.inv ? "IFVG " + tfShort + (f.isBull ? " ▼" : " ▲") : "FVG " + tfShort + (f.isBull ? " ▲" : " ▼")
+            f.bx  := box.new(f.start, f.top, fwdB, f.bot, xloc = xloc.bar_time, border_color = ln, bgcolor = cBoxBg, text = txt, text_size = size.tiny, text_color = ln, text_halign = text.align_right, text_valign = text.align_bottom)
+            f.mid := line.new(f.start, (f.top + f.bot) / 2, fwdB, (f.top + f.bot) / 2, xloc = xloc.bar_time, color = cMid, style = line.style_dashed, width = 1)
+
+// ============================================================================
+//  PANEL
+// ============================================================================
+tbPos = panelPos == "Arriba derecha" ? position.top_right : panelPos == "Abajo izquierda" ? position.bottom_left : panelPos == "Abajo derecha" ? position.bottom_right : position.top_left
+var table tb = table.new(tbPos, 2, 20, bgcolor = color.new(chart.bg_color, 5), frame_color = color.new(cFg, 70), frame_width = 1, border_width = 0)
+
+f_row(int r, string a, string b, color ca, color cb) =>
+    table.cell(tb, 0, r, a, text_color = ca, text_size = size.small, text_halign = text.align_center)
+    table.cell(tb, 1, r, b, text_color = cb, text_size = size.small, text_halign = text.align_left)
+
+f_full(int r, string t, color c) =>
+    table.cell(tb, 0, r, t, text_color = c, text_size = size.small, text_halign = text.align_left)
+    table.merge_cells(tb, 0, r, 1, r)
+
+f_chk(int r, bool ok, bool armed, string nm, string det) =>
+    bool  on = ok and armed
+    color cc = on ? (sDir > 0 ? cUp : cDn) : cNt
+    f_row(r, on ? "✔" : "·", nm + "   " + det, cc, on ? cFg : color.new(cFg, 40))
+
+if barstate.islast and showPanel
+    table.clear(tb, 0, 0, 1, 19)
+    bool nextSess = timenow >= time_close("D")
+    float po  = nextSess ? dO0 : dO
+    float ph_ = nextSess ? dH0 : dH
+    float pl_ = nextSess ? dL0 : dL
+    float pc_ = nextSess ? dC0 : dC
+    float pp_ = nextSess ? dPC0 : dPC
+    int   pt  = nextSess ? time_close("D") : dT1
+    [pdir, pwhy] = f_bias(po, ph_, pl_, pc_, pp_, sD.tot)
+    color pcol = pdir > 0 ? cUp : pdir < 0 ? cDn : cNt
+    int   score = f_score()
+    bool  armed = sDir != 0
+
+    f_full(0, "MONACO   BIAS " + (nextSess ? "PRÓXIMA SESIÓN" : "SESIÓN ACTUAL") + ": " + f_dirTxt(pdir) + "   (" + pwhy + ")", pcol)
+    f_full(1, "D-1 " + (na(pt) ? "--" : str.format_time(pt, "EEE dd/MM", syminfo.timezone)) + "   O " + str.tostring(po) + "  H " + str.tostring(ph_) + "  L " + str.tostring(pl_) + "  C " + str.tostring(pc_) + "  (" + (pc_ > po ? "verde" : pc_ < po ? "roja" : "doji") + ")", color.new(cFg, 30))
+    color scol = armed ? (score >= minScore ? cOk : sDir > 0 ? cUp : cDn) : cNt
+    f_full(2, armed ? (sDir > 0 ? "SETUP LARGO   " : "SETUP CORTO   ") + str.tostring(score) + "/8" : "SIN SETUP ARMADO", scol)
+    f_chk(3,  k1, armed, "1. Daily BIAS (PDCC)", armed ? f_dirTxt(biasDir) : "")
+    f_chk(4,  k2, armed, "2. Toma de liquidez", armed ? sSweepNm : "15M/1H/4H/PDH-PDL")
+    f_chk(5,  k3, armed, "3. Reacción a POI HT", armed and k3 ? k3Name : "FVG/OB/BB 15M-4H")
+    f_chk(6,  k4, armed, "4. A favor de estructura", structTf)
+    f_chk(7,  k5, armed, "5. Liquidez contraria", armed and not na(sR) ? str.tostring(sR, "#.#") + "R" : "")
+    f_chk(8,  k6, armed, "6. IFVG", tfShort)
+    f_chk(9,  k7, armed, "7. CISD 5M + retesteo FVG", cisdDirect ? "velas del gráfico" : chartSec < 300 ? "serie 5M" : "TF del gráfico")
+    f_chk(10, k8, armed, "8. SMT", not smtOn ? "off" : syminfo.root + " vs " + smtTicker + (smtOk ? "" : "  SIN DATOS"))
+    f_full(11, armed ? "ventana: " + str.tostring(setupWin - (bar_index - sBar)) + " velas" : "esperando toma de liquidez", color.new(cFg, 30))
+    f_full(12, "setups: " + str.tostring(nSetups) + "   señales: " + str.tostring(nSignals) + (na(lastSetBar) ? "" : "   (último hace " + str.tostring(bar_index - lastSetBar) + " velas)"), color.new(cFg, 30))
+
+    int r = 13
+    // Diagnostico: siempre si algo no va; si no, solo con el panel completo
+    bool trouble = not htfReady or bar_index < 30 or nSetups == 0
+    if not panelCompact or trouble
+        int lu = 0
+        int ld = 0
+        for q in liqs
+            if q.isHigh
+                lu += 1
+            else
+                ld += 1
+        f_full(r, "D1 " + f_arrow(f_dirOf(sD.tot)) + "  H4 " + f_arrow(f_dirOf(sH4.tot)) + "  H1 " + f_arrow(f_dirOf(sH1.tot)) + "  15M " + f_arrow(f_dirOf(sM15.tot)) + "    liquidez viva " + str.tostring(lu) + "↑ / " + str.tostring(ld) + "↓    zonas POI HT " + str.tostring(array.size(zones)), color.new(cFg, 40))
+        r += 1
+        f_full(r, "velas HTF  D1 " + str.tostring(sD.nBars) + "  H4 " + str.tostring(sH4.nBars) + "  H1 " + str.tostring(sH1.nBars) + "  15M " + str.tostring(sM15.nBars) + (na(firstModelT) ? "   modelo sin arrancar" : "   evaluado desde " + str.format_time(firstModelT, "EEE dd/MM HH:mm", syminfo.timezone)), color.new(cFg, 40))
+        r += 1
+    if isSynth
+        f_full(r, "modelo sobre velas REALES (el gráfico usa velas sintéticas)", color.new(cFg, 40))
+        r += 1
+    if chartSec > 900
+        f_full(r, "⚠ gráfico por encima de 15M: POI 15M y CISD 5M pierden precisión. Usa 1-5M.", color.orange)
+        r += 1
+    if not htfReady or bar_index < 30
+        f_full(r, "CARGANDO: faltan velas de TF superior", color.orange)
