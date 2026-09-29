@@ -15,8 +15,17 @@
 // en historico y en tiempo real. (La version Pine anterior usaba [1] con lookahead_off: en el
 // historico eso es la vela de ANTEAYER.)
 //
-// VELAS REALES: todo se calcula sobre ticker.standard(), asi que en Heiken Ashi / Renko el
-// modelo sigue viendo velas normales.
+// VELAS REALES: en Heiken Ashi / Renko el modelo pide velas normales del mismo simbolo, pero
+// CONSERVANDO la sesion (RTH/ETH) y el ajuste por cambio de contrato del grafico. (La version
+// anterior usaba ticker.standard(), que los quita: con MNQ1!/MES1! y "ajuste por cambio de
+// contrato" activado, PDH/PDL, maximos/minimos HTF y zonas POI salian desplazados respecto a las
+// velas, y las barridas se evaluaban contra niveles que no estaban donde se veian.)
+//
+// REPRODUCCION: el aviso "mercado cerrado -> PDH/PDL de la proxima sesion" ya no se dispara en
+// Bar Replay (timenow es la hora real, no la de la reproduccion).
+//
+// CISD en graficos por encima de 5M: se calcula en la propia vela, sin el retraso de una vela
+// que metia pedir el mismo TF con [1].
 //
 // NO VALIDADO: umbrales por convencion, sin optimizar ni probar fuera de muestra.
 // Contar confluencias no es lo mismo que tener ventaja. Solo visual, sin ordenes.
@@ -132,7 +141,10 @@ cClear = color.new(#000000, 100)
 //  VELAS REALES Y ATR
 // ============================================================================
 isSynth   = chart.is_heikinashi or chart.is_renko or chart.is_linebreak or chart.is_kagi or chart.is_pnf
-stdTicker = ticker.standard(syminfo.tickerid)
+// Grafico normal: su propio ticker (misma sesion y ajuste que las velas que se ven).
+// Grafico sintetico: velas normales del simbolo; ticker.new hereda la sesion del grafico y el
+// ajuste por cambio de contrato (backadjustment.inherit por defecto).
+stdTicker = isSynth ? ticker.new(syminfo.prefix, syminfo.ticker) : syminfo.tickerid
 [so_, sh_, sl_, sc_] = request.security(stdTicker, timeframe.period, [open, high, low, close], lookahead = barmerge.lookahead_off)
 ro = isSynth ? so_ : open
 rh = isSynth ? sh_ : high
@@ -145,6 +157,14 @@ atrM = ta.rma(trR, 14)
 chartSec = timeframe.in_seconds()
 tfms     = chartSec * 1000
 tfShort  = chartSec % 60 == 0 and chartSec < 86400 ? str.tostring(chartSec / 60) + "M" : timeframe.period
+
+// Mercado cerrado (fin de semana / festivo) en la ultima vela: el dia que acaba de terminar es el
+// D-1 de la proxima sesion. En Bar Replay timenow es la hora REAL, asi que antes esto se cumplia
+// siempre y cambiaba PDH/PDL y el bias por los del dia en curso. Se exige que la ultima vela sea
+// historica y que el cierre diario sea reciente (menos de 4 dias).
+f_nextSess() =>
+    int tcD = time_close("D")
+    not barstate.isrealtime and not na(tcD) and timenow >= tcD and timenow - tcD < 4 * 86400000
 
 // ============================================================================
 //  TIPOS
@@ -577,14 +597,29 @@ f_retireFvg(Fvg f, int endT) =>
 [dO0, dH0, dL0, dC0, dPC0, dTw0] = request.security(stdTicker, "D", [open, high, low, close, close[1], time_close[1]], lookahead = barmerge.lookahead_on)
 
 // CISD de 5M: en las propias velas si el grafico ya es 5M real; si no, serie de 5M.
-cisdDirect = not isSynth and chartSec == 300
+// Por encima de 5M se usa la vela del grafico tal cual: pedir el MISMO TF con [1] + lookahead_on
+// devolvia la vela anterior y el CISD llegaba una vela tarde.
+cisdDirect = not isSynth and chartSec >= 300
 cisdTf     = chartSec <= 300 ? "5" : timeframe.period
 [dcUp, dcDn, drUp, drDn, dcLvl, dcLvlT, dcT, dcTc] = f_cisd(cisdMinRun, cisdDisp, cisdExpiry, retestBars, minFvgAtr, cisdFirst)
-[scUp, scDn, srUp, srDn, scLvl, scLvlT, scT, scTc] = request.security(stdTicker, cisdTf, f_cisdShift(cisdMinRun, cisdDisp, cisdExpiry, retestBars, minFvgAtr, cisdFirst), lookahead = barmerge.lookahead_on)
+[hcUp, hcDn, hrUp, hrDn, hcLvl, hcLvlT, hcT, hcTc] = request.security(stdTicker, cisdTf, f_cisdShift(cisdMinRun, cisdDisp, cisdExpiry, retestBars, minFvgAtr, cisdFirst), lookahead = barmerge.lookahead_on)
+// Grafico sintetico de 5M o mas: velas reales del mismo TF, sin desplazar
+[rcUp, rcDn, rrUp, rrDn, rcLvl, rcLvlT, rcT, rcTc] = request.security(stdTicker, timeframe.period, f_cisd(cisdMinRun, cisdDisp, cisdExpiry, retestBars, minFvgAtr, cisdFirst), lookahead = barmerge.lookahead_off)
+cisdSameTf = chartSec >= 300
+scUp  = cisdSameTf ? rcUp : hcUp
+scDn  = cisdSameTf ? rcDn : hcDn
+srUp  = cisdSameTf ? rrUp : hrUp
+srDn  = cisdSameTf ? rrDn : hrDn
+scLvl = cisdSameTf ? rcLvl : hcLvl
+scLvlT = cisdSameTf ? rcLvlT : hcLvlT
+scT   = cisdSameTf ? rcT : hcT
+scTc  = cisdSameTf ? rcTc : hcTc
 
 // SMT: la otra pata del par, con el mismo feed que el grafico (evita la trampa _DL)
 smtOther  = syminfo.root == "MES" ? "MNQ" : "MES"
-smtTicker = str.length(smtSymIn) > 0 ? smtSymIn : syminfo.prefix + ":" + smtOther + "1!"
+smtName   = str.length(smtSymIn) > 0 ? smtSymIn : syminfo.prefix + ":" + smtOther + "1!"
+// Automatico: misma sesion y mismo ajuste por cambio de contrato que el grafico
+smtTicker = str.length(smtSymIn) > 0 ? smtSymIn : ticker.new(syminfo.prefix, smtOther + "1!")
 [mh, ml]  = request.security(smtTicker, timeframe.period, [high, low], lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
 smtOk     = smtOn and not na(mh) and not na(ml)
 mph       = ta.pivothigh(mh, pivM15, pivM15)
@@ -897,7 +932,7 @@ if useAlerts and (sigLong or sigShort)
 if barstate.islast
     int  fwdL     = time + lvlFwd * tfms
     int  fwdB     = time + math.max(2, lvlFwd / 2) * tfms
-    bool nextSess = timenow >= time_close("D")
+    bool nextSess = f_nextSess()
 
     // Mercado cerrado: el dia que acaba de terminar es el D-1 de la proxima sesion
     if nextSess and not na(dH0)
@@ -1010,7 +1045,7 @@ f_chk(int r, bool ok, bool armed, string nm, string det) =>
 
 if barstate.islast and showPanel
     table.clear(tb, 0, 0, 1, 19)
-    bool nextSess = timenow >= time_close("D")
+    bool nextSess = f_nextSess()
     float po  = nextSess ? dO0 : dO
     float ph_ = nextSess ? dH0 : dH
     float pl_ = nextSess ? dL0 : dL
@@ -1032,8 +1067,8 @@ if barstate.islast and showPanel
     f_chk(6,  k4, armed, "4. A favor de estructura", structTf)
     f_chk(7,  k5, armed, "5. Liquidez contraria", armed and not na(sR) ? str.tostring(sR, "#.#") + "R" : "")
     f_chk(8,  k6, armed, "6. IFVG", tfShort)
-    f_chk(9,  k7, armed, "7. CISD 5M + retesteo FVG", cisdDirect ? "velas del gráfico" : chartSec < 300 ? "serie 5M" : "TF del gráfico")
-    f_chk(10, k8, armed, "8. SMT", not smtOn ? "off" : syminfo.root + " vs " + smtTicker + (smtOk ? "" : "  SIN DATOS"))
+    f_chk(9,  k7, armed, "7. CISD 5M + retesteo FVG", chartSec < 300 ? "serie 5M" : chartSec == 300 ? "velas del gráfico" : "TF del gráfico")
+    f_chk(10, k8, armed, "8. SMT", not smtOn ? "off" : syminfo.root + " vs " + smtName + (smtOk ? "" : "  SIN DATOS"))
     f_full(11, armed ? "ventana: " + str.tostring(setupWin - (bar_index - sBar)) + " velas" : "esperando toma de liquidez", color.new(cFg, 30))
     f_full(12, "setups: " + str.tostring(nSetups) + "   señales: " + str.tostring(nSignals) + (na(lastSetBar) ? "" : "   (último hace " + str.tostring(bar_index - lastSetBar) + " velas)"), color.new(cFg, 30))
 
